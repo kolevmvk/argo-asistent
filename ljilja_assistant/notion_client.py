@@ -148,6 +148,21 @@ class NotionClient:
         }
         return self._request("POST", f"/databases/{self.config.notion_database_id}/query", payload).get("results", [])
 
+    def query_assistant_context(self, page_size: int = 12) -> list[dict[str, Any]]:
+        payload = {
+            "filter": {
+                "or": [
+                    {"property": "Type", "select": {"equals": "Note"}},
+                    {"property": "Type", "select": {"equals": "Plan"}},
+                    {"property": "Status", "select": {"equals": "Planned"}},
+                    {"property": "Status", "select": {"equals": "In Progress"}},
+                ]
+            },
+            "sorts": [{"timestamp": "created_time", "direction": "descending"}],
+            "page_size": page_size,
+        }
+        return self._request("POST", f"/databases/{self.config.notion_database_id}/query", payload).get("results", [])
+
     def reschedule_check(self, page_id: str, next_check: datetime, status: str = "Planned") -> dict[str, Any]:
         return self.update_page(
             page_id,
@@ -179,6 +194,37 @@ def page_status(page: dict[str, Any]) -> str:
     props = page.get("properties", {})
     status = props.get("Status", {}).get("select", {}) or {}
     return status.get("name", "bez statusa")
+
+
+def page_type(page: dict[str, Any]) -> str:
+    props = page.get("properties", {})
+    item_type = props.get("Type", {}).get("select", {}) or {}
+    return item_type.get("name", "")
+
+
+def page_project(page: dict[str, Any]) -> str:
+    props = page.get("properties", {})
+    rich_text = props.get("Project", {}).get("rich_text", [])
+    return rich_text[0]["plain_text"] if rich_text else ""
+
+
+def memory_line(page: dict[str, Any]) -> str:
+    props = page.get("properties", {})
+    date_prop = props.get("Date", {}).get("date", {}) or {}
+    parts = [page_title(page)]
+    item_type = page_type(page)
+    status = page_status(page)
+    project = page_project(page)
+    when = date_prop.get("start", "")
+    if item_type:
+        parts.append(f"Type: {item_type}")
+    if status and status != "bez statusa":
+        parts.append(f"Status: {status}")
+    if project:
+        parts.append(f"Project: {project}")
+    if when:
+        parts.append(f"Date: {when}")
+    return "- " + " | ".join(parts)
 
 
 def page_repeat(page: dict[str, Any]) -> str:

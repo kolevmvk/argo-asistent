@@ -15,7 +15,7 @@ import urllib.request
 from .config import Config
 from .jira_client import JiraClient
 from .mac_status import get_mac_status
-from .notion_client import NotionClient, page_check_mode, page_next_check, page_repeat, page_status, page_title, summarize_page
+from .notion_client import NotionClient, memory_line, page_check_mode, page_next_check, page_repeat, page_status, page_title, summarize_page
 from .ollama_client import OllamaClient
 from .parser import ParsedItem, parse_serbian
 
@@ -67,7 +67,8 @@ DATE_HINTS = (
     "nedelja",
 )
 
-REMINDER_WORDS = ("podseti", "podsetime", "podsjeti", "seti me", "sjeti me", "zapamti", "podsećaj", "podsecaj", "proveravaj")
+REMINDER_WORDS = ("podseti", "podsetime", "podsjeti", "seti me", "sjeti me", "podsećaj", "podsecaj", "proveravaj")
+MEMORY_WORDS = ("zapamti", "upamti", "zabeleži", "zabelezi", "zapisi", "zapiši", "imaj u vidu")
 TASK_WORDS = ("zadatak", "task", "todo", "rok", "deadline", "uradi", "završi", "zavrsi", "treba")
 WEEKDAY_NAMES = {
     "ponedeljak": 0,
@@ -136,6 +137,7 @@ class TelegramBot:
         self.offset = 0
         self.last_daily_report_date: str | None = None
         self.last_created_pages: dict[str, tuple[str, str]] = {}
+        self.recent_turns: dict[str, list[str]] = {}
         self.api_url = f"https://api.telegram.org/bot{config.telegram_bot_token}"
 
     def _api(self, method: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -276,6 +278,13 @@ class TelegramBot:
         cleaned = re.sub(r"\bu\s+\d{1,2}(?::\d{2})?\s*h?\b", "", cleaned, flags=re.IGNORECASE)
         cleaned = re.sub(r"\b\d{1,2}:\d{2}\b", "", cleaned)
         cleaned = re.sub(r"\b\d{1,2}h\b", "", cleaned, flags=re.IGNORECASE)
+        return re.sub(r"\s+", " ", cleaned).strip(" ,.-")
+
+    @staticmethod
+    def _clean_memory_title(text: str) -> str:
+        cleaned = TelegramBot._strip_address(text)
+        cleaned = re.sub(r"^(zapamti|upamti|zabeleži|zabelezi|zapisi|zapiši|imaj u vidu)\s+", "", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"^(da|ovo|to|o meni da)\s+", "", cleaned, flags=re.IGNORECASE)
         return re.sub(r"\s+", " ", cleaned).strip(" ,.-")
 
     @staticmethod
@@ -428,6 +437,22 @@ class TelegramBot:
         if any(re.search(pattern, normalized) for pattern in PRESENCE_PATTERNS):
             return {"action": "chat", "reply": "Tu sam. Reci šta treba."}
 
+        has_memory_word = any(word in normalized for word in MEMORY_WORDS)
+        has_date_or_time = self._specific_due_datetime(text) is not None or self._relative_datetime(text) is not None
+        if has_memory_word and not has_date_or_time:
+            title = self._clean_memory_title(text)
+            if not title:
+                return {"action": "clarify", "reply": "Šta želiš da zapamtim?"}
+            return {
+                "action": "create_item",
+                "type": "Note",
+                "title": title,
+                "date_iso": None,
+                "project": "",
+                "repeat": "None",
+                "check_mode": "Reminder",
+            }
+
         duty_match = re.search(r"\b(dežuran|dezuran|dežurstvo|dezurstvo)\b", normalized)
         if duty_match:
             item = parse_serbian(self._strip_address(text), self.config.timezone)
@@ -450,6 +475,8 @@ class TelegramBot:
             fixed = re.sub(r"\bstra\b", "sutra", text, flags=re.IGNORECASE)
             title = self._clean_reminder_title(fixed)
             if not title:
+                if re.search(r"\b(sutra|stra)\b", normalized):
+                    return {"action": "clarify", "reply": "Na šta tačno da te podsetim sutra?"}
                 return {"action": "clarify", "reply": "Na šta tačno da te podsetim?"}
             relative_when = self._relative_datetime(fixed)
             if relative_when is not None:
@@ -549,20 +576,43 @@ class TelegramBot:
     def handle_chat(self, chat_id: str, text: str) -> None:
         try:
             self.send_message(chat_id, "Razmišljam...")
-            self.send_message(chat_id, self.ollama.ask(text))
+            reply = self.ollama.ask(text, self.assistant_context(chat_id))
+            self.send_message(chat_id, reply)
+            self._remember_turn(chat_id, f"Korisnik: {text}")
+            self._remember_turn(chat_id, f"Ljilja: {reply}")
         except Exception as exc:
             self.send_message(
                 chat_id,
                 f"Ne mogu trenutno da dobijem odgovor od lokalne Ollame.\n{exc}",
             )
 
-    def classify_intent(self, text: str) -> dict[str, Any]:
+    def _remember_turn(self, chat_id: str, line: str) -> None:
+        turns = self.recent_turns.setdefault(str(chat_id), [])
+        turns.append(line)
+        del turns[:-8]
+
+    def assistant_context(self, chat_id: str = "") -> str:
+        chunks: list[str] = []
+        turns = self.recent_turns.get(str(chat_id), [])
+        if turns:
+            chunks.append("Skoriji razgovor:\n" + "\n".join(turns))
+        if self.config.dry_run or not self.config.notion_enabled:
+            return "\n\n".join(chunks)
+        try:
+            pages = self.notion.query_assistant_context()
+        except Exception:
+            return "\n\n".join(chunks)
+        if pages:
+            chunks.append("Notion memorija:\n" + "\n".join(memory_line(page) for page in pages))
+        return "\n\n".join(chunks)
+
+    def classify_intent(self, text: str, context: str = "") -> dict[str, Any]:
         fast = self.fast_intent(text)
         if fast is not None:
             return fast
         tz = ZoneInfo(self.config.timezone)
         now = datetime.now(tz)
-        return self.ollama.extract_intent(text, now.isoformat(), self.config.timezone)
+        return self.ollama.extract_intent(text, now.isoformat(), self.config.timezone, context)
 
     def _item_from_intent(self, text: str, intent: dict[str, Any]) -> ParsedItem:
         title = str(intent.get("title") or "").strip()
@@ -588,6 +638,8 @@ class TelegramBot:
         if self.config.dry_run:
             self.send_message(chat_id, self._dry_run_text(item))
             self.last_created_pages[str(chat_id)] = ("DRY_RUN", item.title)
+            self._remember_turn(chat_id, f"Korisnik je tražio unos: {item.raw or item.title}")
+            self._remember_turn(chat_id, f"Ljilja je pripremila {item.type}: {item.title}")
             return
         if not self.config.notion_enabled:
             self.send_message(chat_id, "Notion nije podešen. Popuni NOTION_TOKEN i NOTION_DATABASE_ID ili uključi DRY_RUN=true.")
@@ -596,7 +648,10 @@ class TelegramBot:
         page_id = str(created.get("id") or "")
         if page_id:
             self.last_created_pages[str(chat_id)] = (page_id, item.title)
-        self.send_message(chat_id, f"Upisano u Notion: {item.title}")
+        prefix = "Zapamćeno u Notionu" if item.type == "Note" else "Upisano u Notion"
+        self.send_message(chat_id, f"{prefix}: {item.title}")
+        self._remember_turn(chat_id, f"Korisnik je tražio unos: {item.raw or item.title}")
+        self._remember_turn(chat_id, f"Ljilja je upisala {item.type}: {item.title}")
 
     def handle_correction(self, chat_id: str, corrected_text: str) -> None:
         if not corrected_text:
@@ -625,9 +680,10 @@ class TelegramBot:
             self.handle_correction(chat_id, correction)
             return
         try:
-            if self.fast_intent(text) is None:
+            intent = self.fast_intent(text)
+            if intent is None:
                 self.send_message(chat_id, "Razmišljam...")
-            intent = self.classify_intent(text)
+                intent = self.classify_intent(text, self.assistant_context(chat_id))
         except Exception as exc:
             if self.is_notion_entry(text):
                 self.handle_item(chat_id, parse_serbian(self._strip_address(text), self.config.timezone))
@@ -642,10 +698,14 @@ class TelegramBot:
         if action == "clarify":
             reply = str(intent.get("reply") or "Na šta tačno da te podsetim?")
             self.send_message(chat_id, reply)
+            self._remember_turn(chat_id, f"Korisnik: {text}")
+            self._remember_turn(chat_id, f"Ljilja: {reply}")
             return
         reply = str(intent.get("reply") or "").strip()
         if reply:
             self.send_message(chat_id, reply)
+            self._remember_turn(chat_id, f"Korisnik: {text}")
+            self._remember_turn(chat_id, f"Ljilja: {reply}")
             return
         self.handle_chat(chat_id, text)
 

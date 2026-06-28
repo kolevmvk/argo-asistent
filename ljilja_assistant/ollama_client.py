@@ -13,7 +13,8 @@ SYSTEM_PROMPT = (
     "Ti si Ljilja, lokalni lični AI asistent na Mac mini računaru. "
     "Odgovaraš kratko, jasno i na srpskom, najčešće u 1-3 rečenice. "
     "Ne prikazuj tok razmišljanja, analizu, korake ni interne beleške. "
-    "Telegram je glavni kanal, Notion je baza za planove i zadatke, a Jira se koristi samo na eksplicitnu komandu /jira. "
+    "Telegram je glavni kanal, Notion je tvoja dugoročna memorija za zadatke, planove, beleške, činjenice o korisniku i radni kontekst, a Jira se koristi samo na eksplicitnu komandu /jira. "
+    "Kada dobiješ Notion kontekst, koristi ga kao memoriju, ali nemoj izmišljati detalje kojih nema. "
     "Ne tvrdi da si upisala nešto u Notion osim ako korisnik to eksplicitno traži kroz zadatak i sistem potvrdi upis."
 )
 
@@ -75,23 +76,28 @@ class OllamaClient:
         content = data.get("message", {}).get("content", "").strip()
         return self._clean_output(content)
 
-    def ask(self, text: str) -> str:
+    def ask(self, text: str, context: str = "") -> str:
+        user_content = text
+        if context:
+            user_content = f"Notion memorija:\n{context}\n\nKorisnik:\n{text}"
         content = self._chat(
             [
                 {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": text},
+                {"role": "user", "content": user_content},
             ],
             timeout=CHAT_TIMEOUT_SECONDS,
             num_predict=CHAT_NUM_PREDICT,
         )
         return content or "Tu sam, ali nisam dobila smislen odgovor od lokalnog modela."
 
-    def extract_intent(self, text: str, now_iso: str, timezone: str) -> dict[str, Any]:
+    def extract_intent(self, text: str, now_iso: str, timezone: str, context: str = "") -> dict[str, Any]:
+        context_block = f"\nKontekst razgovora i Notion memorija:\n{context}\n" if context else ""
         prompt = f"""
 Klasifikuj Telegram poruku za privatnog asistenta Ljilju.
 
 Sada: {now_iso}
 Zona: {timezone}
+{context_block}
 
 Vrati ISKLJUCIVO JSON objekat, bez markdowna i bez dodatnog teksta.
 
@@ -107,7 +113,8 @@ Schema:
 
 Pravila:
 - Ako korisnik razgovara, pita ko si, da li si tu, trazi savet ili objasnjenje: action=chat.
-- Ako korisnik zeli da zapamtis, podsetis, planiras, zabelezis ili zakazes nesto: action=create_item.
+- Ako korisnik zeli da zapamtis ili zabelezis podatak, preferenciju, cinjenicu o sebi ili radni kontekst: action=create_item, type=Note.
+- Ako korisnik zeli da podsetis, planiras, zakazes ili napravis obavezu: action=create_item, type=Task ili Plan.
 - Ako korisnik trazi podsetnik ali ne kaze na sta tacno da ga podsetis: action=clarify i pitaj kratko sta treba da zapamtis.
 - Razumi srpski, latinicu/cirilicu, greske u kucanju i "Ljiljo".
 - Bez objasnjenja, analize, thinking process-a i markdowna.

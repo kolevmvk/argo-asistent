@@ -91,6 +91,8 @@ Primeri unosa:
 
 Ljilja je AI-first: obične poruke idu na lokalni model. Podsetnici, planovi, beleške, dežurstva i jasne stavke sa datumom/vremenom idu u Notion.
 
+Notion je Ljiljina dugoročna memorija. Poruke tipa `zapamti da...`, `zabeleži...`, `upamti...` i slične upisuju se kao `Note`, a pri običnom razgovoru Ljilja povlači skoriji razgovor i relevantne Notion stavke kao kontekst za Gemmu. Tako može da odlučuje iz konteksta umesto da svaku poruku tretira kao izolovan unos.
+
 Brzi lokalni parser pokriva česte obrasce bez čekanja modela: `danas`, `sutra`, dan u nedelji, `do petka`, konkretan datum, `svaki dan`, `radnim danima`, `svakog ponedeljka`, `svakog 15. u mesecu` i `svakog 15.07`. Ako poruka nije jasna, tek tada se pali lokalni AI.
 
 Jednokratni podsetnici i taskovi koriste `Date`. Ponavljajuće provere koriste `NextCheck`, `Repeat` i `CheckMode`, pa Ljilja može sama da pita da li je nešto urađeno. Dežurstva se upisuju kao `Duty` sa `Date` i `Location`, pa ih Notion Calendar vidi preko `Date` polja.

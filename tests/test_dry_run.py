@@ -29,13 +29,13 @@ class DryRunBot(TelegramBot):
     def handle_chat(self, chat_id: str, text: str) -> None:
         self.sent.append("AI odgovor")
 
-    def classify_intent(self, text: str) -> dict:
+    def classify_intent(self, text: str, context: str = "") -> dict:
         self.classify_calls += 1
         return self.intents.get(text, {"action": "chat", "reply": "AI odgovor"})
 
 
 class TimeoutIntentBot(DryRunBot):
-    def classify_intent(self, text: str) -> dict:
+    def classify_intent(self, text: str, context: str = "") -> dict:
         raise TimeoutError("timed out")
 
 
@@ -49,8 +49,17 @@ class ChatBotForTimeout(TelegramBot):
 
 
 class BrokenOllama:
-    def ask(self, text: str) -> str:
+    def ask(self, text: str, context: str = "") -> str:
         raise TimeoutError("timed out")
+
+
+class ContextOllama:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str]] = []
+
+    def ask(self, text: str, context: str = "") -> str:
+        self.calls.append((text, context))
+        return "AI odgovor sa memorijom"
 
 
 class FakeOllamaResponse:
@@ -78,6 +87,18 @@ class FakeNotion:
                     "Title": {"title": [{"plain_text": "idem da piskim"}]},
                     "Status": {"select": {"name": "Planned"}},
                     "Date": {"date": {"start": now.isoformat()}},
+                },
+            }
+        ]
+
+    def query_assistant_context(self, page_size: int = 12) -> list[dict]:
+        return [
+            {
+                "id": "memory-1",
+                "properties": {
+                    "Title": {"title": [{"plain_text": "korisnik voli kratke odgovore"}]},
+                    "Type": {"select": {"name": "Note"}},
+                    "Status": {"select": {"name": "Planned"}},
                 },
             }
         ]
@@ -184,7 +205,7 @@ class DryRunTest(unittest.TestCase):
             environ={"TELEGRAM_BOT_TOKEN": "x", "TELEGRAM_ALLOWED_CHAT_ID": "1", "DRY_RUN": "true"},
         )
         bot = DryRunBot(config)
-        bot.handle_text("1", "Ljiljo jesi tu")
+        bot.handle_text("1", "Ljiljo ko si ti?")
         self.assertEqual(bot.sent[-1], "AI odgovor")
 
     def test_plain_sentence_without_date_goes_to_ai(self) -> None:
@@ -291,7 +312,66 @@ class DryRunTest(unittest.TestCase):
         }
         bot.handle_text("1", "podseti me sutra da pozovem Marka")
         self.assertIn("DRY_RUN=true", bot.sent[-1])
-        self.assertIn("Upisao bih: pozovi Marka", bot.sent[-1])
+        self.assertIn("Upisao bih: pozovem Marka", bot.sent[-1])
+
+    def test_memory_request_goes_to_notion_note(self) -> None:
+        config = Config.load(
+            env_file="/tmp/ljilja-assistant-missing.env",
+            environ={"TELEGRAM_BOT_TOKEN": "x", "TELEGRAM_ALLOWED_CHAT_ID": "1", "DRY_RUN": "true"},
+        )
+        bot = DryRunBot(config)
+        bot.handle_text("1", "Ljiljo zapamti da volim kratke odgovore")
+        self.assertIn("Type: Note", bot.sent[-1])
+        self.assertIn("Upisao bih: volim kratke odgovore", bot.sent[-1])
+
+    def test_live_memory_confirmation_says_remembered(self) -> None:
+        config = Config.load(
+            env_file="/tmp/ljilja-assistant-missing.env",
+            environ={
+                "TELEGRAM_BOT_TOKEN": "x",
+                "TELEGRAM_ALLOWED_CHAT_ID": "1",
+                "DRY_RUN": "false",
+                "NOTION_TOKEN": "n",
+                "NOTION_DATABASE_ID": "d",
+            },
+        )
+        bot = DryRunBot(config)
+        bot.notion = FakeNotion()  # type: ignore[assignment]
+        bot.handle_text("1", "Ljiljo zapamti da volim kratke odgovore")
+        self.assertEqual(bot.sent[-1], "Zapamćeno u Notionu: volim kratke odgovore")
+
+    def test_chat_uses_notion_memory_context(self) -> None:
+        config = Config.load(
+            env_file="/tmp/ljilja-assistant-missing.env",
+            environ={
+                "TELEGRAM_BOT_TOKEN": "x",
+                "TELEGRAM_ALLOWED_CHAT_ID": "1",
+                "DRY_RUN": "false",
+                "NOTION_TOKEN": "n",
+                "NOTION_DATABASE_ID": "d",
+            },
+        )
+        bot = ChatBotForTimeout(config)
+        fake_notion = FakeNotion()
+        fake_ollama = ContextOllama()
+        bot.notion = fake_notion  # type: ignore[assignment]
+        bot.ollama = fake_ollama  # type: ignore[assignment]
+        bot.handle_chat("1", "šta znaš o meni?")
+        self.assertIn("korisnik voli kratke odgovore", fake_ollama.calls[-1][1])
+        self.assertEqual(bot.sent[-1], "AI odgovor sa memorijom")
+
+    def test_chat_uses_recent_conversation_context(self) -> None:
+        config = Config.load(
+            env_file="/tmp/ljilja-assistant-missing.env",
+            environ={"TELEGRAM_BOT_TOKEN": "x", "TELEGRAM_ALLOWED_CHAT_ID": "1", "DRY_RUN": "true"},
+        )
+        bot = ChatBotForTimeout(config)
+        fake_ollama = ContextOllama()
+        bot.ollama = fake_ollama  # type: ignore[assignment]
+        bot._remember_turn("1", "Korisnik: zovi projekat Argo")
+        bot.handle_chat("1", "kako se zove projekat?")
+        self.assertIn("zovi projekat Argo", fake_ollama.calls[-1][1])
+        self.assertEqual(bot.sent[-1], "AI odgovor sa memorijom")
 
     def test_vague_reminder_asks_for_clarification(self) -> None:
         config = Config.load(
