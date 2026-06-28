@@ -20,8 +20,10 @@ SYSTEM_PROMPT = (
 
 CHAT_TIMEOUT_SECONDS = 20
 INTENT_TIMEOUT_SECONDS = 6
+LINK_TIMEOUT_SECONDS = 6
 CHAT_NUM_PREDICT = 96
 INTENT_NUM_PREDICT = 96
+LINK_NUM_PREDICT = 120
 OLLAMA_KEEP_ALIVE = "1h"
 
 
@@ -142,4 +144,50 @@ Poruka: {text}
             raise RuntimeError(f"Ollama je vratila neispravan JSON intent: {content[:200]}") from exc
         if parsed.get("action") not in {"chat", "create_item", "clarify"}:
             raise RuntimeError(f"Nepoznat intent action: {parsed.get('action')}")
+        return parsed
+
+    def link_memory(self, item: dict[str, Any], context: str) -> dict[str, Any]:
+        if not context:
+            return {"action": "none"}
+        prompt = f"""
+Poveži novi unos sa postojećom Notion memorijom ako ima dovoljno osnova.
+
+Novi unos:
+{json.dumps(item, ensure_ascii=False)}
+
+Notion memorija:
+{context}
+
+Vrati ISKLJUCIVO JSON:
+{{
+  "action": "none" | "link" | "ask",
+  "project": "projekat/tema ako je sigurno ili prazno",
+  "relation_note": "kratka beleška o vezi ili prazno",
+  "question": "kratko pitanje korisniku ako action=ask"
+}}
+
+Pravila:
+- link samo ako je veza jasna iz teksta ili memorije.
+- ask ako postoje 2+ moguće veze ili nedostaje ključna informacija.
+- none ako je unos samostalan.
+- Ne izmišljaj ljude, firme ni projekte.
+""".strip()
+        content = self._chat(
+            [
+                {"role": "system", "content": "Ti si strogi parser za povezivanje memorije. Vracas samo validan JSON."},
+                {"role": "user", "content": prompt},
+            ],
+            timeout=LINK_TIMEOUT_SECONDS,
+            json_mode=True,
+            num_predict=LINK_NUM_PREDICT,
+        )
+        match = re.search(r"\{.*\}", content, flags=re.DOTALL)
+        if not match:
+            return {"action": "none"}
+        try:
+            parsed = json.loads(match.group(0))
+        except json.JSONDecodeError:
+            return {"action": "none"}
+        if parsed.get("action") not in {"none", "link", "ask"}:
+            return {"action": "none"}
         return parsed

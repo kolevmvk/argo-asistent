@@ -634,7 +634,56 @@ class TelegramBot:
             raw=text,
         )
 
+    def enrich_item_with_memory(self, chat_id: str, item: ParsedItem) -> tuple[ParsedItem, str | None]:
+        context = self.assistant_context(chat_id)
+        if not context:
+            return item, None
+        decision = self.ollama.link_memory(
+            {
+                "title": item.title,
+                "type": item.type,
+                "project": item.project,
+                "date": item.date.isoformat() if item.date else None,
+                "raw": item.raw,
+            },
+            context,
+        )
+        action = decision.get("action")
+        if action == "ask":
+            question = str(decision.get("question") or "").strip()
+            return item, question or "Sa kojim projektom ili temom da povežem ovo?"
+        if action != "link":
+            return item, None
+        project = str(decision.get("project") or item.project or "").strip()
+        relation_note = str(decision.get("relation_note") or "").strip()
+        if not project and not relation_note:
+            return item, None
+        enriched = ParsedItem(
+            title=item.title,
+            type=item.type,
+            date=item.date,
+            project=project,
+            repeat=item.repeat,
+            next_check=item.next_check,
+            check_mode=item.check_mode,
+            location=item.location,
+            priority=item.priority,
+            source=item.source,
+            result=relation_note or item.result,
+            score=item.score,
+            raw=item.raw,
+        )
+        return enriched, None
+
     def handle_item(self, chat_id: str, item: ParsedItem) -> None:
+        if not self.config.dry_run and self.config.notion_enabled:
+            try:
+                item, question = self.enrich_item_with_memory(chat_id, item)
+            except Exception:
+                question = None
+            if question:
+                self.send_message(chat_id, question)
+                return
         if self.config.dry_run:
             self.send_message(chat_id, self._dry_run_text(item))
             self.last_created_pages[str(chat_id)] = ("DRY_RUN", item.title)

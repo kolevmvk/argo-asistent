@@ -56,10 +56,14 @@ class BrokenOllama:
 class ContextOllama:
     def __init__(self) -> None:
         self.calls: list[tuple[str, str]] = []
+        self.link_decision = {"action": "none"}
 
     def ask(self, text: str, context: str = "") -> str:
         self.calls.append((text, context))
         return "AI odgovor sa memorijom"
+
+    def link_memory(self, item: dict, context: str) -> dict:
+        return self.link_decision
 
 
 class FakeOllamaResponse:
@@ -78,6 +82,7 @@ class FakeNotion:
         self.updated: list[tuple[str, str]] = []
         self.rescheduled: list[tuple[str, str]] = []
         self.items_updated: list[tuple[str, str]] = []
+        self.created_items: list[object] = []
 
     def query_due(self, now: datetime) -> list[dict]:
         return [
@@ -124,6 +129,7 @@ class FakeNotion:
         self.rescheduled.append((page_id, status))
 
     def create_item(self, item) -> dict:
+        self.created_items.append(item)
         return {"id": "created-page"}
 
     def update_item(self, page_id: str, item) -> dict:
@@ -339,6 +345,61 @@ class DryRunTest(unittest.TestCase):
         bot.notion = FakeNotion()  # type: ignore[assignment]
         bot.handle_text("1", "Ljiljo zapamti da volim kratke odgovore")
         self.assertEqual(bot.sent[-1], "Zapamćeno u Notionu: volim kratke odgovore")
+
+    def test_memory_linking_enriches_item_before_create(self) -> None:
+        config = Config.load(
+            env_file="/tmp/ljilja-assistant-missing.env",
+            environ={
+                "TELEGRAM_BOT_TOKEN": "x",
+                "TELEGRAM_ALLOWED_CHAT_ID": "1",
+                "DRY_RUN": "false",
+                "NOTION_TOKEN": "n",
+                "NOTION_DATABASE_ID": "d",
+            },
+        )
+        bot = DryRunBot(config)
+        fake_notion = FakeNotion()
+        fake_ollama = ContextOllama()
+        fake_ollama.link_decision = {
+            "action": "link",
+            "project": "ellco.pro",
+            "relation_note": "Povezano sa postojećim Ellco kontekstom.",
+        }
+        bot.notion = fake_notion  # type: ignore[assignment]
+        bot.ollama = fake_ollama  # type: ignore[assignment]
+
+        bot.handle_text("1", "Ljiljo zapamti da Milan duguje odgovor")
+
+        created = fake_notion.created_items[-1]
+        self.assertEqual(created.project, "ellco.pro")
+        self.assertEqual(created.result, "Povezano sa postojećim Ellco kontekstom.")
+        self.assertEqual(bot.sent[-1], "Zapamćeno u Notionu: Milan duguje odgovor")
+
+    def test_memory_linking_asks_when_relation_is_ambiguous(self) -> None:
+        config = Config.load(
+            env_file="/tmp/ljilja-assistant-missing.env",
+            environ={
+                "TELEGRAM_BOT_TOKEN": "x",
+                "TELEGRAM_ALLOWED_CHAT_ID": "1",
+                "DRY_RUN": "false",
+                "NOTION_TOKEN": "n",
+                "NOTION_DATABASE_ID": "d",
+            },
+        )
+        bot = DryRunBot(config)
+        fake_notion = FakeNotion()
+        fake_ollama = ContextOllama()
+        fake_ollama.link_decision = {
+            "action": "ask",
+            "question": "Da li je ovo vezano za ellco.pro ili za drugi projekat?",
+        }
+        bot.notion = fake_notion  # type: ignore[assignment]
+        bot.ollama = fake_ollama  # type: ignore[assignment]
+
+        bot.handle_text("1", "Ljiljo zapamti da Milan duguje odgovor")
+
+        self.assertEqual(fake_notion.created_items, [])
+        self.assertEqual(bot.sent[-1], "Da li je ovo vezano za ellco.pro ili za drugi projekat?")
 
     def test_chat_uses_notion_memory_context(self) -> None:
         config = Config.load(
