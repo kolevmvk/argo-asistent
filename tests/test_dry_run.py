@@ -401,6 +401,63 @@ class DryRunTest(unittest.TestCase):
         self.assertEqual(fake_notion.created_items, [])
         self.assertEqual(bot.sent[-1], "Da li je ovo vezano za ellco.pro ili za drugi projekat?")
 
+    def test_pending_link_answer_creates_original_item_without_loop(self) -> None:
+        config = Config.load(
+            env_file="/tmp/ljilja-assistant-missing.env",
+            environ={
+                "TELEGRAM_BOT_TOKEN": "x",
+                "TELEGRAM_ALLOWED_CHAT_ID": "1",
+                "DRY_RUN": "false",
+                "NOTION_TOKEN": "n",
+                "NOTION_DATABASE_ID": "d",
+            },
+        )
+        bot = DryRunBot(config)
+        fake_notion = FakeNotion()
+        fake_ollama = ContextOllama()
+        fake_ollama.link_decision = {
+            "action": "ask",
+            "question": "Da li je ovo vezano za ellco.pro ili za drugi projekat?",
+        }
+        bot.notion = fake_notion  # type: ignore[assignment]
+        bot.ollama = fake_ollama  # type: ignore[assignment]
+
+        bot.handle_text("1", "Ljiljo zapamti da Milan duguje odgovor")
+        bot.handle_text("1", "ellco.pro")
+
+        created = fake_notion.created_items[-1]
+        self.assertEqual(created.title, "Milan duguje odgovor")
+        self.assertEqual(created.project, "ellco.pro")
+        self.assertEqual(created.result, "Povezano na osnovu korisnikovog odgovora: ellco.pro")
+        self.assertEqual(bot.sent[-1], "Zapamćeno u Notionu: Milan duguje odgovor")
+
+    def test_task_linking_ask_is_ignored_to_avoid_blocking_reminders(self) -> None:
+        config = Config.load(
+            env_file="/tmp/ljilja-assistant-missing.env",
+            environ={
+                "TELEGRAM_BOT_TOKEN": "x",
+                "TELEGRAM_ALLOWED_CHAT_ID": "1",
+                "DRY_RUN": "false",
+                "NOTION_TOKEN": "n",
+                "NOTION_DATABASE_ID": "d",
+            },
+        )
+        bot = DryRunBot(config)
+        fake_notion = FakeNotion()
+        fake_ollama = ContextOllama()
+        fake_ollama.link_decision = {
+            "action": "ask",
+            "question": "Da li je ovo vezano za ellco.pro?",
+        }
+        bot.notion = fake_notion  # type: ignore[assignment]
+        bot.ollama = fake_ollama  # type: ignore[assignment]
+
+        bot.handle_text("1", "Ljiljo podseti me sutra da pozovem Marka")
+
+        self.assertEqual(len(fake_notion.created_items), 1)
+        self.assertEqual(fake_notion.created_items[-1].title, "pozovem Marka")
+        self.assertEqual(bot.sent[-1], "Upisano u Notion: pozovem Marka")
+
     def test_chat_uses_notion_memory_context(self) -> None:
         config = Config.load(
             env_file="/tmp/ljilja-assistant-missing.env",

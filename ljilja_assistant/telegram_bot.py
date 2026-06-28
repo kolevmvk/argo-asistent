@@ -138,6 +138,7 @@ class TelegramBot:
         self.last_daily_report_date: str | None = None
         self.last_created_pages: dict[str, tuple[str, str]] = {}
         self.recent_turns: dict[str, list[str]] = {}
+        self.pending_link_items: dict[str, ParsedItem] = {}
         self.api_url = f"https://api.telegram.org/bot{config.telegram_bot_token}"
 
     def _api(self, method: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -650,6 +651,8 @@ class TelegramBot:
         )
         action = decision.get("action")
         if action == "ask":
+            if item.type != "Note":
+                return item, None
             question = str(decision.get("question") or "").strip()
             return item, question or "Sa kojim projektom ili temom da povežem ovo?"
         if action != "link":
@@ -675,13 +678,14 @@ class TelegramBot:
         )
         return enriched, None
 
-    def handle_item(self, chat_id: str, item: ParsedItem) -> None:
-        if not self.config.dry_run and self.config.notion_enabled:
+    def handle_item(self, chat_id: str, item: ParsedItem, allow_link: bool = True) -> None:
+        if allow_link and not self.config.dry_run and self.config.notion_enabled:
             try:
                 item, question = self.enrich_item_with_memory(chat_id, item)
             except Exception:
                 question = None
             if question:
+                self.pending_link_items[str(chat_id)] = item
                 self.send_message(chat_id, question)
                 return
         if self.config.dry_run:
@@ -701,6 +705,47 @@ class TelegramBot:
         self.send_message(chat_id, f"{prefix}: {item.title}")
         self._remember_turn(chat_id, f"Korisnik je tražio unos: {item.raw or item.title}")
         self._remember_turn(chat_id, f"Ljilja je upisala {item.type}: {item.title}")
+
+    @staticmethod
+    def _negative_link_answer(text: str) -> bool:
+        normalized = TelegramBot._strip_address(text).lower().strip()
+        return normalized in {"ne", "nije", "nema veze", "bez veze", "samostalno", "preskoci", "preskoči"}
+
+    @staticmethod
+    def _project_from_link_answer(text: str) -> str:
+        cleaned = TelegramBot._strip_address(text)
+        cleaned = re.sub(r"^(da|jeste|vezano je za|za|projekat)\s+", "", cleaned, flags=re.IGNORECASE)
+        return re.sub(r"\s+", " ", cleaned).strip(" .,-")
+
+    def handle_pending_link_answer(self, chat_id: str, text: str) -> bool:
+        item = self.pending_link_items.pop(str(chat_id), None)
+        if item is None:
+            return False
+        if self._negative_link_answer(text):
+            self.handle_item(chat_id, item, allow_link=False)
+            return True
+        project = self._project_from_link_answer(text)
+        if not project:
+            self.pending_link_items[str(chat_id)] = item
+            self.send_message(chat_id, "Napiši naziv projekta/teme, ili reci 'ne' ako nema veze.")
+            return True
+        linked = ParsedItem(
+            title=item.title,
+            type=item.type,
+            date=item.date,
+            project=project,
+            repeat=item.repeat,
+            next_check=item.next_check,
+            check_mode=item.check_mode,
+            location=item.location,
+            priority=item.priority,
+            source=item.source,
+            result=f"Povezano na osnovu korisnikovog odgovora: {project}",
+            score=item.score,
+            raw=item.raw,
+        )
+        self.handle_item(chat_id, linked, allow_link=False)
+        return True
 
     def handle_correction(self, chat_id: str, corrected_text: str) -> None:
         if not corrected_text:
@@ -724,6 +769,8 @@ class TelegramBot:
         self.send_message(chat_id, f"Ispravljeno u Notionu: {item.title}")
 
     def handle_free_text(self, chat_id: str, text: str) -> None:
+        if self.handle_pending_link_answer(chat_id, text):
+            return
         correction = self._correction_text(text)
         if correction is not None:
             self.handle_correction(chat_id, correction)
