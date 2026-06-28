@@ -135,6 +135,7 @@ class TelegramBot:
         self.ollama = OllamaClient(config)
         self.offset = 0
         self.last_daily_report_date: str | None = None
+        self.last_created_pages: dict[str, tuple[str, str]] = {}
         self.api_url = f"https://api.telegram.org/bot{config.telegram_bot_token}"
 
     def _api(self, method: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -276,6 +277,29 @@ class TelegramBot:
         cleaned = re.sub(r"\b\d{1,2}:\d{2}\b", "", cleaned)
         cleaned = re.sub(r"\b\d{1,2}h\b", "", cleaned, flags=re.IGNORECASE)
         return re.sub(r"\s+", " ", cleaned).strip(" ,.-")
+
+    @staticmethod
+    def _correction_text(text: str) -> str | None:
+        normalized = TelegramBot._strip_address(text).strip()
+        lowered = normalized.lower()
+        if not lowered:
+            return None
+
+        replacement = re.search(r"\b(?:nije|ne)\s+.+?\s+nego\s+(.+)$", normalized, flags=re.IGNORECASE)
+        if replacement:
+            return replacement.group(1).strip(" .,-")
+
+        if not re.match(r"^(ispravi|ispravi\s+ovo|ispravi\s+to|ispravi\s+poslednje|promeni|promijeni|prepravi|koriguj)\b", lowered):
+            return None
+
+        cleaned = re.sub(
+            r"^(ispravi|promeni|promijeni|prepravi|koriguj)\s*(ovo|to|poslednje|zadnje|unos|stavku|task|zadatak)?\s*",
+            "",
+            normalized,
+            flags=re.IGNORECASE,
+        ).strip(" .,-")
+        cleaned = re.sub(r"^(u|na|kao|da bude)\s+", "", cleaned, flags=re.IGNORECASE).strip(" .,-")
+        return cleaned
 
     @staticmethod
     def _number_value(value: str) -> int | None:
@@ -563,14 +587,43 @@ class TelegramBot:
     def handle_item(self, chat_id: str, item: ParsedItem) -> None:
         if self.config.dry_run:
             self.send_message(chat_id, self._dry_run_text(item))
+            self.last_created_pages[str(chat_id)] = ("DRY_RUN", item.title)
             return
         if not self.config.notion_enabled:
             self.send_message(chat_id, "Notion nije podešen. Popuni NOTION_TOKEN i NOTION_DATABASE_ID ili uključi DRY_RUN=true.")
             return
         created = self.notion.create_item(item)
+        page_id = str(created.get("id") or "")
+        if page_id:
+            self.last_created_pages[str(chat_id)] = (page_id, item.title)
         self.send_message(chat_id, f"Upisano u Notion: {item.title}")
 
+    def handle_correction(self, chat_id: str, corrected_text: str) -> None:
+        if not corrected_text:
+            self.send_message(chat_id, "Šta tačno da ispravim u poslednjem unosu?")
+            return
+        last = self.last_created_pages.get(str(chat_id))
+        if not last:
+            self.send_message(chat_id, "Nemam zapamćen poslednji unos za ispravku. Pošalji ceo ispravan tekst.")
+            return
+        page_id, _ = last
+        item = parse_serbian(corrected_text, self.config.timezone)
+        if self.config.dry_run:
+            self.send_message(chat_id, f"DRY_RUN=true, ispravio bih poslednji unos na: {item.title}")
+            self.last_created_pages[str(chat_id)] = (page_id, item.title)
+            return
+        if not self.config.notion_enabled:
+            self.send_message(chat_id, "Notion nije podešen. Ne mogu da ispravim postojeći unos.")
+            return
+        self.notion.update_item(page_id, item)
+        self.last_created_pages[str(chat_id)] = (page_id, item.title)
+        self.send_message(chat_id, f"Ispravljeno u Notionu: {item.title}")
+
     def handle_free_text(self, chat_id: str, text: str) -> None:
+        correction = self._correction_text(text)
+        if correction is not None:
+            self.handle_correction(chat_id, correction)
+            return
         try:
             if self.fast_intent(text) is None:
                 self.send_message(chat_id, "Razmišljam...")

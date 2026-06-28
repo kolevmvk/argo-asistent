@@ -71,6 +71,24 @@ class NotionClient:
         }
         return self._request("POST", "/pages", payload)
 
+    @staticmethod
+    def _update_properties(item: ParsedItem) -> dict[str, Any]:
+        props: dict[str, Any] = {
+            "Title": {"title": [{"text": {"content": item.title}}]},
+        }
+        if item.type:
+            props["Type"] = {"select": {"name": item.type}}
+        if item.project:
+            props["Project"] = {"rich_text": [{"text": {"content": item.project}}]}
+        if item.location:
+            props["Location"] = {"rich_text": [{"text": {"content": item.location}}]}
+        if item.date:
+            props["Date"] = {"date": {"start": item.date.isoformat()}}
+        return props
+
+    def update_item(self, page_id: str, item: ParsedItem) -> dict[str, Any]:
+        return self.update_page(page_id, self._update_properties(item))
+
     def update_page(self, page_id: str, properties: dict[str, Any]) -> dict[str, Any]:
         return self._request("PATCH", f"/pages/{page_id}", {"properties": properties})
 

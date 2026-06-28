@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 from ljilja_assistant.config import Config
 from ljilja_assistant.ollama_client import OllamaClient
+from ljilja_assistant.parser import parse_serbian
 from ljilja_assistant.telegram_bot import TelegramBot
 
 
@@ -67,6 +68,7 @@ class FakeNotion:
     def __init__(self) -> None:
         self.updated: list[tuple[str, str]] = []
         self.rescheduled: list[tuple[str, str]] = []
+        self.items_updated: list[tuple[str, str]] = []
 
     def query_due(self, now: datetime) -> list[dict]:
         return [
@@ -102,6 +104,10 @@ class FakeNotion:
 
     def create_item(self, item) -> dict:
         return {"id": "created-page"}
+
+    def update_item(self, page_id: str, item) -> dict:
+        self.items_updated.append((page_id, item.title))
+        return {"id": page_id}
 
 
 class DryRunTest(unittest.TestCase):
@@ -226,6 +232,49 @@ class DryRunTest(unittest.TestCase):
         bot.handle_text("1", "zadatak: proveri ovo")
         self.assertIn("DRY_RUN=true", bot.sent[-1])
         self.assertIn("Upisao bih: proveri ovo", bot.sent[-1])
+
+    def test_correction_updates_last_item_instead_of_creating_new_one(self) -> None:
+        config = Config.load(
+            env_file="/tmp/ljilja-assistant-missing.env",
+            environ={
+                "TELEGRAM_BOT_TOKEN": "x",
+                "TELEGRAM_ALLOWED_CHAT_ID": "1",
+                "DRY_RUN": "false",
+                "NOTION_TOKEN": "n",
+                "NOTION_DATABASE_ID": "d",
+            },
+        )
+        bot = DryRunBot(config)
+        fake = FakeNotion()
+        bot.notion = fake  # type: ignore[assignment]
+        bot.handle_item("1", parse_serbian("sutra u 9 pogresan tekst", config.timezone))
+
+        bot.handle_text("1", "ispravi u sutra u 9 ispravan tekst")
+
+        self.assertEqual(fake.items_updated, [("created-page", "ispravan tekst")])
+        self.assertEqual(bot.sent[-1], "Ispravljeno u Notionu: ispravan tekst")
+
+    def test_correction_does_not_go_to_ai_or_new_notion_item(self) -> None:
+        config = Config.load(
+            env_file="/tmp/ljilja-assistant-missing.env",
+            environ={"TELEGRAM_BOT_TOKEN": "x", "TELEGRAM_ALLOWED_CHAT_ID": "1", "DRY_RUN": "true"},
+        )
+        bot = DryRunBot(config)
+        bot.handle_item("1", parse_serbian("sutra u 9 pogresan tekst", config.timezone))
+
+        bot.handle_text("1", "nije pogresan tekst nego ispravan tekst")
+
+        self.assertEqual(bot.classify_calls, 0)
+        self.assertIn("ispravio bih poslednji unos na: ispravan tekst", bot.sent[-1])
+
+    def test_empty_correction_asks_clarification(self) -> None:
+        config = Config.load(
+            env_file="/tmp/ljilja-assistant-missing.env",
+            environ={"TELEGRAM_BOT_TOKEN": "x", "TELEGRAM_ALLOWED_CHAT_ID": "1", "DRY_RUN": "true"},
+        )
+        bot = DryRunBot(config)
+        bot.handle_text("1", "ispravi")
+        self.assertEqual(bot.sent[-1], "Šta tačno da ispravim u poslednjem unosu?")
 
     def test_reminder_request_goes_to_notion_flow(self) -> None:
         config = Config.load(
